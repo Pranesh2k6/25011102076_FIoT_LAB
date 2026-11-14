@@ -1,0 +1,317 @@
+[
+    {
+        "id": "9c858a4a33e856e5",
+        "type": "mqtt in",
+        "z": "tab_drying",
+        "name": "BME280",
+        "topic": "stm32/nigamanth_project/data",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "af9513ba13df2202",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 140,
+        "y": 120,
+        "wires": [
+            [
+                "0ab75efaba22a608",
+                "03a00b6f4173f5be"
+            ]
+        ]
+    },
+    {
+        "id": "0ab75efaba22a608",
+        "type": "json",
+        "z": "tab_drying",
+        "name": "",
+        "property": "payload",
+        "action": "obj",
+        "pretty": false,
+        "x": 310,
+        "y": 100,
+        "wires": [
+            [
+                "tag_bme"
+            ]
+        ]
+    },
+    {
+        "id": "tag_bme",
+        "type": "function",
+        "z": "tab_drying",
+        "name": "Tag BME280 data",
+        "func": "// Convert JSON string into an object if necessary\nif (typeof msg.payload === \"string\") {\n    try {\n        msg.payload = JSON.parse(msg.payload);\n    } catch (err) {\n        node.error(\"Invalid JSON in BME280 payload\", msg);\n        return null;\n    }\n}\n\n// Validate payload\nif (!msg.payload ||\n    typeof msg.payload !== \"object\" ||\n    Array.isArray(msg.payload)) {\n    node.error(\"BME280 payload must be a JSON object\", msg);\n    return null;\n}\n\n// Assign message topic\nmsg.topic = \"bme\";\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 570,
+        "y": 120,
+        "wires": [
+            [
+                "analysis_join"
+            ]
+        ]
+    },
+    {
+        "id": "analysis_join",
+        "type": "function",
+        "z": "tab_drying",
+        "name": "Fuse data + drying analysis",
+        "func": "\n// Receives BME280 data or OpenWeatherMap response.\nconst now = Date.now();\nlet state = flow.get(\"dryingState\") || {};\n\n// ==========================================\n// 1. RECEIVE AND VALIDATE INPUT DATA\n// ==========================================\n\nif (msg.topic === \"bme\") {\n    const p = msg.payload || {};\n\n    const t = Number(p.temperature);\n    const h = Number(p.humidity);\n    const pressure = Number(p.pressure);\n\n    if (![t, h, pressure].every(Number.isFinite) ||\n        h < 0 || h > 100) {\n        node.warn(\"Invalid BME280 payload.\");\n        return null;\n    }\n\n    state.bme = {\n        temperature: t,\n        humidity: h,\n        pressure: pressure,\n        updatedAt: now\n    };\n\n} else if (msg.topic === \"weather\") {\n    const p = msg.payload || {};\n\n    if (!p.main ||\n        !Number.isFinite(Number(p.main.temp)) ||\n        !Number.isFinite(Number(p.main.humidity)) ||\n        !Number.isFinite(Number(p.main.pressure))) {\n        node.warn(\"Invalid OpenWeatherMap response.\");\n        return null;\n    }\n\n    state.weather = {\n        temperature: Number(p.main.temp),\n        humidity: Number(p.main.humidity),\n        pressure: Number(p.main.pressure),\n\n        description:\n            (p.weather && p.weather[0] &&\n                p.weather[0].description) || \"Unavailable\",\n\n        rainMmPerHour: Number(\n            (p.rain && (p.rain[\"1h\"] || p.rain[\"3h\"])) || 0\n        ),\n\n        windSpeed: Number(\n            (p.wind && p.wind.speed) || 0\n        ),\n\n        updatedAt: now\n    };\n}\n\nflow.set(\"dryingState\", state);\n\n// Wait until both data sources are available.\nif (!state.bme || !state.weather) {\n    return null;\n}\n\n\n// ==========================================\n// 2. ENVIRONMENTAL DATA FUSION\n// ==========================================\n\n// BME280: 80%\n// Chennai Weather: 20%\n\nconst raw = {\n    temperature:\n        0.8 * state.bme.temperature +\n        0.2 * state.weather.temperature,\n\n    humidity:\n        0.8 * state.bme.humidity +\n        0.2 * state.weather.humidity,\n\n    pressure:\n        0.8 * state.bme.pressure +\n        0.2 * state.weather.pressure\n};\n\n\n// ==========================================\n// 3. EMA FILTERING\n// ==========================================\n\n// Alpha = 1.0 for independent test-case evaluation.\n// Change to 0.8 when using live sensor readings.\n\nconst alpha = 1.0;\n\nlet prev = flow.get(\"dryingFiltered\");\n\nconst filtered = prev ? {\n    temperature:\n        alpha * raw.temperature +\n        (1 - alpha) * prev.temperature,\n\n    humidity:\n        alpha * raw.humidity +\n        (1 - alpha) * prev.humidity,\n\n    pressure:\n        alpha * raw.pressure +\n        (1 - alpha) * prev.pressure\n\n} : raw;\n\nflow.set(\"dryingFiltered\", filtered);\n\n\n// ==========================================\n// 4. VAPOUR PRESSURE DEFICIT (VPD)\n// ==========================================\n\nconst T = filtered.temperature;\n\nconst RH = Math.max(\n    0,\n    Math.min(100, filtered.humidity)\n);\n\n// Saturation Vapour Pressure\nconst svp =\n    0.6108 * Math.exp(\n        (17.27 * T) / (T + 237.3)\n    );\n\n// Actual Vapour Pressure\nconst avp = svp * RH / 100;\n\n// Vapour Pressure Deficit\nconst vpd = Math.max(0, svp - avp);\n\n\n// ==========================================\n// 5. DRYING INDEX\n// ==========================================\n\nconst dryingIndex = Math.max(\n    0.15,\n    Math.min(\n        1.8,\n        Math.pow(vpd / 1.7, 1.15)\n    )\n);\n\n\n// ==========================================\n// 6. SUITABILITY SCORE\n// ==========================================\n\nconst clamp = (x, min, max) =>\n    Math.max(min, Math.min(max, x));\n\n// Temperature score\nconst tempScore = clamp(\n    ((T - 15) / 20) * 100,\n    0, 100\n);\n\n// Humidity score\nconst humidityScore = clamp(\n    ((90 - RH) / 60) * 100,\n    0, 100\n);\n\n// VPD score\nconst vpdScore = clamp(\n    (vpd / 1.5) * 100,\n    0, 100\n);\n\n// Weighted suitability score\nconst suitabilityScore = Math.round(\n    0.4 * tempScore +\n    0.5 * humidityScore +\n    0.1 * vpdScore\n);\n\n\n// ==========================================\n// 7. DRYING SUITABILITY RECOMMENDATION\n// ==========================================\n\nlet suitability =\n    suitabilityScore >= 75 ? \"Suitable\" :\n        suitabilityScore >= 45 ? \"Partially Suitable\" :\n            \"Not Suitable\";\n\n// Rain detection\nconst rainingNow =\n    state.weather.rainMmPerHour > 0;\n\nif (rainingNow) {\n    suitability = \"Not Suitable\";\n}\n\nconst advice = rainingNow\n    ? \"Rain is currently reported in Chennai. Avoid outdoor drying.\"\n    : suitability === \"Suitable\"\n        ? \"Conditions are favourable. Choose a well-ventilated drying location.\"\n        : suitability === \"Partially Suitable\"\n            ? \"Drying is possible but may take longer. Improve airflow and keep clothes sheltered.\"\n            : \"Conditions are unfavourable. Prefer indoor drying with good ventilation.\";\n\n\n// ==========================================\n// 8. FABRIC-SPECIFIC DRYING ESTIMATION\n// ==========================================\n\nconst times = {\n    cotton: 6 / dryingIndex,\n    polyester: 2.5 / dryingIndex,\n    nylon: 2 / dryingIndex\n};\n\nconst fabricAdvice = {};\n\nfor (const [fabric, hours] of Object.entries(times)) {\n\n    fabricAdvice[fabric] = {\n        hours: Number(hours.toFixed(2)),\n\n        recommendation:\n            hours < 3 ? \"Excellent\" :\n                hours <= 6 ? \"Suitable\" :\n                    hours <= 10 ? \"Partially Suitable\" :\n                        \"Not Recommended\"\n    };\n}\n\n\n// ==========================================\n// 9. DASHBOARD OUTPUT\n// ==========================================\n\nmsg.payload = {\n\n    bme: state.bme,\n\n    chennai: state.weather,\n\n    combined: {\n        temperature: Number(T.toFixed(2)),\n        humidity: Number(RH.toFixed(2)),\n        pressure: Number(filtered.pressure.toFixed(2))\n    },\n\n    analysis: {\n        svp: Number(svp.toFixed(3)),\n        avp: Number(avp.toFixed(3)),\n        vpd: Number(vpd.toFixed(3)),\n        dryingIndex: Number(dryingIndex.toFixed(3)),\n\n        suitabilityScore,\n        suitability,\n        advice,\n        rainingNow\n    },\n\n    fabrics: fabricAdvice,\n\n    updatedAt: new Date().toISOString()\n};\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1150,
+        "y": 180,
+        "wires": [
+            [
+                "debug_analysis",
+                "ui_template_drying"
+            ]
+        ]
+    },
+    {
+        "id": "build_weather_url",
+        "type": "function",
+        "z": "tab_drying",
+        "name": "Build OpenWeatherMap request",
+        "func": "// Add your OpenWeatherMap API key below. Keep it private.\nconst API_KEY = \"API_KEY\";\nmsg.method = \"GET\";\nmsg.url = `https://api.openweathermap.org/data/2.5/weather?lat=13.0827&lon=80.2707&units=metric&appid=${API_KEY}`;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 440,
+        "y": 240,
+        "wires": [
+            [
+                "http_weather"
+            ]
+        ]
+    },
+    {
+        "id": "inject_weather",
+        "type": "inject",
+        "z": "tab_drying",
+        "name": "Fetch Chennai weather (every 10 min)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "600",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "weather",
+        "payload": "",
+        "payloadType": "date",
+        "x": 310,
+        "y": 380,
+        "wires": [
+            [
+                "build_weather_url"
+            ]
+        ]
+    },
+    {
+        "id": "http_weather",
+        "type": "http request",
+        "z": "tab_drying",
+        "name": "Get Chennai weather",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": true,
+        "headers": [],
+        "x": 680,
+        "y": 240,
+        "wires": [
+            [
+                "tag_weather"
+            ]
+        ]
+    },
+    {
+        "id": "tag_weather",
+        "type": "function",
+        "z": "tab_drying",
+        "name": "Tag weather data",
+        "func": "msg.topic = \"weather\";\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 890,
+        "y": 240,
+        "wires": [
+            [
+                "analysis_join"
+            ]
+        ]
+    },
+    {
+        "id": "ui_template_drying",
+        "type": "ui-template",
+        "z": "tab_drying",
+        "group": "ui_group_drying",
+        "page": "",
+        "ui": "",
+        "name": "Smart Cloth Drying Dashboard",
+        "order": 1,
+        "width": "12",
+        "height": "12",
+        "head": "",
+        "format": "<template>\n  <div v-if=\"msg && msg.payload\" class=\"drying-wrap\">\n    <div class=\"status-card\">\n      <div class=\"eyebrow\">CLOTH DRYING ADVISOR</div>\n      <div class=\"status-line\">\n        <div>\n          <div class=\"score\">{{msg.payload.analysis.suitabilityScore}}<small>/100</small></div>\n          <div class=\"status\">{{msg.payload.analysis.suitability}}</div>\n        </div>\n        <div class=\"pill\">{{msg.payload.analysis.rainingNow ? 'RAIN REPORTED' : 'LIVE ANALYSIS'}}</div>\n      </div>\n      <p>{{msg.payload.analysis.advice}}</p>\n    </div>\n    <div class=\"grid\">\n      <div class=\"card\"><div class=\"label\">BME280 · Temperature</div><div class=\"value\">{{msg.payload.bme.temperature.toFixed(1)}} °C</div></div>\n      <div class=\"card\"><div class=\"label\">BME280 · Humidity</div><div class=\"value\">{{msg.payload.bme.humidity.toFixed(1)}} %</div></div>\n      <div class=\"card\"><div class=\"label\">BME280 · Pressure</div><div class=\"value\">{{msg.payload.bme.pressure.toFixed(1)}} hPa</div></div>\n      <div class=\"card\"><div class=\"label\">Chennai · Temperature</div><div class=\"value\">{{msg.payload.chennai.temperature.toFixed(1)}} °C</div></div>\n      <div class=\"card\"><div class=\"label\">Chennai · Humidity</div><div class=\"value\">{{msg.payload.chennai.humidity.toFixed(1)}} %</div></div>\n      <div class=\"card\"><div class=\"label\">Chennai · Pressure</div><div class=\"value\">{{msg.payload.chennai.pressure.toFixed(1)}} hPa</div></div>\n    </div>\n    <h3>Combined environmental conditions</h3>\n    <div class=\"grid\">\n      <div class=\"card\"><div class=\"label\">Temperature</div><div class=\"value\">{{msg.payload.combined.temperature}} °C</div></div>\n      <div class=\"card\"><div class=\"label\">Humidity</div><div class=\"value\">{{msg.payload.combined.humidity}} %</div></div>\n      <div class=\"card\"><div class=\"label\">Pressure</div><div class=\"value\">{{msg.payload.combined.pressure}} hPa</div></div>\n      <div class=\"card\"><div class=\"label\">VPD</div><div class=\"value\">{{msg.payload.analysis.vpd}} kPa</div></div>\n      <div class=\"card\"><div class=\"label\">Drying Index</div><div class=\"value\">{{msg.payload.analysis.dryingIndex}}</div></div>\n    </div>\n    <h3>Estimated fabric drying time</h3>\n    <div class=\"grid fabrics\">\n      <div class=\"fabric cotton\"><div class=\"label\">Cotton</div><div class=\"value\">{{msg.payload.fabrics.cotton.hours}} h</div><div class=\"label\">{{msg.payload.fabrics.cotton.recommendation}}</div></div>\n      <div class=\"fabric polyester\"><div class=\"label\">Polyester</div><div class=\"value\">{{msg.payload.fabrics.polyester.hours}} h</div><div class=\"label\">{{msg.payload.fabrics.polyester.recommendation}}</div></div>\n      <div class=\"fabric nylon\"><div class=\"label\">Nylon</div><div class=\"value\">{{msg.payload.fabrics.nylon.hours}} h</div><div class=\"label\">{{msg.payload.fabrics.nylon.recommendation}}</div></div>\n    </div>\n    <div class=\"updated\">Last analysis: {{new Date(msg.payload.updatedAt).toLocaleString()}}</div>\n  </div>\n  <div v-else class=\"empty\">Waiting for the first valid BME280 and Chennai weather readings…</div>\n</template>\n<style>\n  .drying-wrap{padding:8px;color:var(--v-theme-on-surface)}\n  .status-card{padding:18px;border-radius:14px;background:var(--v-theme-surface);border:1px solid rgba(128,128,128,.25);margin-bottom:16px}\n  .eyebrow,.label,.updated{font-size:12px;opacity:.72}\n  .status-line{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:8px}\n  .score{font-size:38px;font-weight:750}.score small{font-size:16px;opacity:.6}\n  .status{font-size:20px;font-weight:650}.pill{font-size:11px;padding:7px 10px;border-radius:20px;background:rgba(37,99,235,.12)}\n  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:12px 0 20px}\n  .card,.fabric{padding:14px;border-radius:12px;background:var(--v-theme-surface);border:1px solid rgba(128,128,128,.22)}\n  .value{font-size:23px;font-weight:700;margin-top:5px}\n  h3{font-size:16px;margin:18px 0 8px}.fabric .value{font-size:25px}\n  .cotton{border-left:4px solid #d97706}.polyester{border-left:4px solid #16a34a}.nylon{border-left:4px solid #2563eb}\n  .updated{margin-top:14px}.empty{padding:20px;opacity:.7}\n</style>\n",
+        "noerr": 0,
+        "storeOutMessages": true,
+        "passthru": true,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "",
+        "x": 1420,
+        "y": 220,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "af9513ba13df2202",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "broker.emqx.io",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "ui_group_drying",
+        "type": "ui-group",
+        "name": "Drying Monitor",
+        "page": "ui_page_drying",
+        "width": "12",
+        "height": "1",
+        "order": 1,
+        "showTitle": true,
+        "visible": true,
+        "disabled": false
+    },
+    {
+        "id": "ui_page_drying",
+        "type": "ui-page",
+        "name": "Overview",
+        "ui": "eb7dbff45f90a607",
+        "path": "/overview",
+        "icon": "dashboard",
+        "layout": "grid",
+        "theme": "ui_theme_drying",
+        "breakpoints": [
+            {
+                "name": "Default",
+                "px": "0",
+                "cols": "3"
+            },
+            {
+                "name": "Tablet",
+                "px": "576",
+                "cols": "6"
+            },
+            {
+                "name": "Desktop",
+                "px": "1024",
+                "cols": "12"
+            }
+        ],
+        "order": 2
+    },
+    {
+        "id": "eb7dbff45f90a607",
+        "type": "ui-base",
+        "name": "Smart Cloth Drying System",
+        "path": "/dashboard",
+        "appIcon": "",
+        "includeClientData": true,
+        "acceptsClientConfig": [
+            "ui-notification",
+            "ui-control"
+        ],
+        "showPathInSidebar": false,
+        "headerContent": "page",
+        "navigationStyle": "default",
+        "titleBarStyle": "default",
+        "showReconnectNotification": true,
+        "notificationDisplayTime": 1,
+        "showDisconnectNotification": true,
+        "allowInstall": false
+    },
+    {
+        "id": "ui_theme_drying",
+        "type": "ui-theme",
+        "name": "Default Theme",
+        "colors": {
+            "surface": "#ffffff",
+            "primary": "#2563eb",
+            "bgPage": "#f5f7fb",
+            "groupBg": "#ffffff",
+            "groupOutline": "#e5e7eb"
+        },
+        "sizes": {
+            "density": "default",
+            "pagePadding": "12px",
+            "groupGap": "12px",
+            "groupBorderRadius": "8px",
+            "widgetGap": "12px"
+        }
+    },
+    {
+        "id": "02bdc90ea5e33aee",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "@flowfuse/node-red-dashboard": "1.36.1"
+        }
+    }
+]

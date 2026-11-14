@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "author": "FIoT Lab",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "attrs": {},
+      "type": "board-st-nucleo-c031c6",
+      "id": "nucleo",
+      "top": 0,
+      "left": 0
+    },
+    {
+      "attrs": {},
+      "type": "board-esp-01",
+      "id": "esp",
+      "top": 40,
+      "left": 460
+    },
+    {
+      "attrs": {},
+      "type": "board-bmp180",
+      "id": "bme",
+      "top": 175,
+      "left": -260
+    },
+    {
+      "attrs": {},
+      "type": "wokwi-junction",
+      "id": "jPB7",
+      "top": 220,
+      "left": 11
+    },
+    {
+      "type": "wokwi-text",
+      "id": "ttl0",
+      "top": -70,
+      "left": -260,
+      "attrs": {
+        "text": "CAT 15 - BME280 (I2C) + ESP8266 MQTT"
+      }
+    },
+    {
+      "type": "wokwi-text",
+      "id": "txt1",
+      "top": 325,
+      "left": 85,
+      "attrs": {
+        "text": "NUCLEO-F401RE"
+      }
+    },
+    {
+      "type": "wokwi-text",
+      "id": "txt2",
+      "top": 10,
+      "left": 420,
+      "attrs": {
+        "text": "ESP8266 (Wemos D1 mini, AT firmware)"
+      }
+    },
+    {
+      "type": "wokwi-text",
+      "id": "txt3",
+      "top": 150,
+      "left": -275,
+      "attrs": {
+        "text": "BME280 (I2C 0x76)"
+      }
+    },
+    {
+      "type": "wokwi-text",
+      "id": "txt4",
+      "top": 385,
+      "left": -270,
+      "attrs": {
+        "text": "PA9 TX1 (D8) -> ESP RX\nPA10 RX1 (D2) <- ESP TX\nPB6 SCL (D10), PB7 SDA (CN7-21)\n3V3 -> BME280 VCC, all GND common"
+      }
+    }
+  ],
+  "connections": [
+    [
+      "nucleo:D8",
+      "esp:RX",
+      "orange",
+      [
+        "h180.9",
+        "v-127.5"
+      ]
+    ],
+    [
+      "nucleo:D2",
+      "esp:TX",
+      "green",
+      [
+        "h160.9",
+        "v-222.9"
+      ]
+    ],
+    [
+      "nucleo:GND.8",
+      "esp:GND",
+      "black",
+      [
+        "h181.4",
+        "v-107.7"
+      ]
+    ],
+    [
+      "jPB7:J",
+      "bme:SDA",
+      "blue",
+      [
+        "h-135.8",
+        "v-17"
+      ]
+    ],
+    [
+      "nucleo:D10",
+      "bme:SCL",
+      "purple",
+      [
+        "v168.8",
+        "h-364.1",
+        "v-161.8"
+      ]
+    ],
+    [
+      "nucleo:3V3.1",
+      "bme:VCC",
+      "red",
+      [
+        "h-100.2",
+        "v-12"
+      ]
+    ],
+    [
+      "nucleo:GND.2",
+      "bme:GND",
+      "black",
+      [
+        "h-80.2",
+        "v35.8"
+      ]
+    ]
+  ],
+  "dependencies": {}
+}

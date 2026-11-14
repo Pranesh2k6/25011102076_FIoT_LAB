@@ -2,19 +2,24 @@
 
 **EXP:** CONTINUOUS ASSESSMENT 13
 
-**DATE:** 27/10/2026
+**DATE:** 23/10/2026
 
-**NAME OF EXP:** BME280 Sensor Interfacing Using I²C and MQTT using Custom Built ESP8266 API
+**NAME OF EXP:** BME280 Sensor Interfacing Using I²C and Bosch Sensor API, ESP8266 HTTP, Node Analytics
 
-**HARDWARE SETUP / PLATFORM:** NUCLEO-F401RE (STM32F401RET6, ARM Cortex-M4F, 84 MHz) + Bosch BME280 + Wemos D1 mini — STM32CubeMX + Keil MDK-ARM (STM32CubeIDE project included), STM32 HAL, ESPLib API (clean-room implementation), Node-RED, `broker.emqx.io`
+**HARDWARE SETUP / PLATFORM:** NUCLEO-F401RE (STM32F401RET6, ARM Cortex-M4F, 84 MHz) + Bosch BME280 + Wemos D1 mini + USB-to-TTL serial adapter — STM32CubeMX + Keil MDK-ARM (STM32CubeIDE project included), STM32 HAL, Bosch BME280 Sensor API v3.5.1, Node-RED
 
 ---
 
-## STEP 1–3 : Interface Wrappers (Publish Test)
+## STEP 1–3 : BME280 Interfacing with the Bosch Sensor API
 
 ### 1. Circuit Diagram
 
-Uses the same hardware connections as CAT 12, with `LD2` (`PA5`) additionally used in CAT 13B. Connects to MQTT broker **`broker.emqx.io:1883`**.
+| Nucleo-F401RE Pin | Connected Peripheral |
+|---|---|
+| `PB6` (`I2C1_SCL`) / `PB7` (`I2C1_SDA`) | BME280 `SCL` / `SDA` (100 kHz standard-mode I²C) |
+| `3V3` / `GND` | BME280 `VCC` / `GND`, with `SDO` tied to `GND` (I²C address `0x76`) |
+| `PA9` (`USART1_TX`) / `PA10` (`USART1_RX`) | Wemos `RX` / `TX` (115200 baud, interrupt-driven RX) |
+| `PC6` (`USART6_TX`) / `PC7` (`USART6_RX`) | USB-to-TTL adapter for PC debug console (115200 baud) |
 
 ![Circuit Diagram](circuit.png)
 
@@ -26,53 +31,41 @@ Uses the same hardware connections as CAT 12, with `LD2` (`PA5`) additionally us
 
 **Working Principle:**
 
-The ESPLib driver associates with Wi-Fi, opens a TCP socket to the broker, transmits an MQTT 3.1.1 `CONNECT` packet (120 s keep-alive, clean session), and blocks with a timeout until a valid `CONNACK` confirms connection acceptance. If any step fails, the state machine retries every 5 s and automatically reconnects if the link drops at runtime. Once connected, the Nucleo publishes `hello #n from STM32 Nucleo` to `pranesh/stm32/test` once per second.
+The official Bosch driver (`bme280.c` in `Core/Src`, `bme280.h` and `bme280_defs.h` in `Core/Inc`) is bound to the STM32 HAL by populating three function pointers in the `bme280_dev` descriptor:
+
+| Bosch API Callback | Application Wrapper | Underlying STM32 Mechanism |
+|---|---|---|
+| `read` | `user_i2c_read()` | `HAL_I2C_Mem_Read()` |
+| `write` | `user_i2c_write()` | `HAL_I2C_Mem_Write()` |
+| `delay_us` | `user_delay_us()` | `HAL_Delay()` for delays ≥ 1 ms; Cortex-M4 DWT cycle counter for sub-millisecond waits |
+
+The firmware executes the lab progression in order: verify the chip ID (`0x60` at register `0xD0`), inspect the uncompensated burst registers (`0xF7`–`0xFE`), compute factory-calibrated values via the Bosch compensation API, print them on `USART6`, and alternate every 10 samples between Profile A (`2×` oversampling, IIR filter off) and Profile B (`16×` oversampling, IIR filter coefficient 16).
 
 **Pseudocode:**
 
-1. Call `mqtt_start()`: `ESP8266_Init()` → `ESP8266_wifiConnect()` → `ESP8266_portConnect()` → `MQTT_connectBroker()`.
-2. In the main loop: format the counter string, publish via `MQTT_publishTopic(..., QoS0)`, log to `USART6`, and wait 1 s.
+1. Read I²C register `0xD0`; verify that it returns `0x60` (halting with a diagnostic message if not).
+2. Call `bme_setup()`: populate `bme280_dev`, invoke `bme280_init()`, configure oversampling, IIR filter, and standby period, and switch the sensor to Normal mode.
+3. Every 2 s: burst-read registers `0xF7`–`0xFE` and log the raw 20-bit/16-bit ADC counts.
+4. Call `bme280_get_sensor_data()` to obtain compensated temperature (°C), pressure (Pa converted to hPa), and humidity (%RH), then print them.
+5. Toggle between Profile A and Profile B after every 10 readings.
 
 **Code Base:**
 
-- Project files: `CAT13A_MQTT_Publish_Test.ioc` (STM32CubeMX configuration), `MDK-ARM/CAT13A_MQTT_Publish_Test.uvprojx` (Keil MDK), `.project` / `.cproject` (STM32CubeIDE); firmware entry point in `Core/Src/main.c`.
-- `mqtt_start()` and `dbg()`
+- Project files: `CAT13A_BME280_I2C_UART.ioc` (STM32CubeMX configuration), `MDK-ARM/CAT13A_BME280_I2C_UART.uvprojx` (Keil MDK), `.project` / `.cproject` (STM32CubeIDE); firmware entry point in `Core/Src/main.c`.
+- `read_chip_id()`, `print_raw()`, `apply_profile()`, `bme_setup()`, and `bme_read()`
+- `fmt_fixed.h` — formats floating-point values using integer arithmetic (avoiding `-u _printf_float`)
 
 **Expected Output:**
 
 ```
-MQTT connected (CONNACK accepted) as stm32-pranesh-test
-PUB pranesh/stm32/test : hello #1 from STM32 Nucleo
+Chip ID     : 0x60 (BME280 OK)
+--- Reading 1 (profile A) ---
+Raw ADC     : T=... P=... H=...
+Temperature : 28.45 °C
+Pressure    : 1008.72 hPa
+Humidity    : 62.30 %RH
 ```
-
-**ESPLib API Reference:**
-
-| ESPLib Call | Underlying AT / MQTT Traffic |
-|---|---|
-| `ESP8266_Init(StationMode, huart1)` | Sends `AT` and `AT+CWMODE=1` |
-| `ESP8266_wifiConnect()` | Sends `AT+CWQAP` and `AT+CWJAP` |
-| `ESP8266_portConnect("TCP", broker, "1883")` | Opens TCP socket via `AT+CIPSTART` |
-| `MQTT_connectBroker()` | Sends MQTT `CONNECT` (`0x10`, protocol `"MQTT"` level 4, clean session, keep-alive, client ID) |
-| `MQTT_publishTopic()` | Sends MQTT `PUBLISH` (`0x30`, topic length + string, payload) |
-| `MQTT_subscribeTopic()` | Sends MQTT `SUBSCRIBE` (`0x82`) |
-
-**Clean-Room Library Improvements:** `ESPLib.h` preserves the exact function names from the lab handout so student application code compiles without changes, while `ESPLib.c` and `mqtt_packet.c` provide a new implementation that resolves the flaws of the original course driver:
-
-| Limitation in Original Driver | Behaviour in Reworked Implementation |
-|---|---|
-| Aborted the UART RX interrupt on every transmit, dropping any broker packets that arrived mid-send | Arms the UART RX interrupt once at startup into a 1 KB ring buffer and never aborts it |
-| Inferred packet boundaries from 100 ms of UART silence; left `colonIndex` uninitialised on `SUBACK` / `PINGRESP` frames | Strips `+IPD,<len>:` framing first and feeds payload bytes into a stateful MQTT parser driven by packet type and Remaining Length |
-| Handled only 1-byte Remaining Length without bounds checks or guaranteed NUL termination | Decodes variable-length Remaining Length (up to 4 bytes), validates buffer capacities prior to copying, guarantees NUL-terminated strings, and skips oversized packets |
-| Ignored `CONNACK` / `SUBACK` responses and used unbounded `do {} while` loops that could hang indefinitely | Verifies `CONNACK` acceptance and `SUBACK ≠ 0x80`; enforces timeouts on every wait and returns `funcOk` / `funcErr` |
-
-Additional safeguards: `PINGREQ` verifies `PINGRESP` (reconnecting if the broker fails to respond), oversized topics are dropped and counted, and the firmware logs RX-overflow or dropped-packet counters whenever they increment.
-
-The client operates strictly at **QoS 0**: publish or subscribe calls requesting QoS 1/2 return `funcErr`, `SUBACK` must grant QoS 0, and any incoming QoS 1/2 publish is discarded and counted. `UNSUBSCRIBE` verifies the matching `UNSUBACK`.
-
-If a UART ring-buffer overflow or malformed `+IPD` header occurs, all buffered bytes are flushed, the parser resets, and both the TCP socket and MQTT session are marked disconnected to force a clean reconnect. If `HAL_UART_Receive_IT` ever fails to re-arm, the main loop retries automatically. `CONNACK` Session Present flags are validated and wildcard publish topics are rejected.
-
-Host-side verification: `make -C tests` executes 54 packet parser checks and 56 ESPLib checks (with fault injection against a simulated ESP8266 covering both `AT+CIPSEND` reply sequences, split/coalesced TCP segments, mismatched ACK IDs, unresponsive brokers, and mid-packet buffer overflows).
 
 ### 3. Inference
 
-Framing MQTT `CONNECT` and `PUBLISH` packets in C and sending them over the ESP8266 TCP link enables reliable telemetry publishing to a cloud MQTT broker.
+I²C register access, chip-ID verification (`0x60`), raw ADC readout, and Bosch calibration compensation all work as expected, producing responsive temperature, pressure, and humidity measurements.
